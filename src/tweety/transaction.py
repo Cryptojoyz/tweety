@@ -15,9 +15,11 @@ from typing import Union, List
 from .utils import float_to_hex, is_odd, base64_encode
 
 ON_DEMAND_FILE_REGEX = re.compile(
-    r"""['|\"]{1}ondemand\.s['|\"]{1}:\s*['|\"]{1}([\w]*)['|\"]{1}""", flags=(re.VERBOSE | re.MULTILINE))
+    r"""['|\"]{1}ondemand\.s['|\"]{1}:\s*['|\"]{1}([\w.-]*)['|\"]{1}""", flags=(re.VERBOSE | re.MULTILINE))
+ON_DEMAND_BUNDLE_REGEX = re.compile(
+    r"""(ondemand\.s\.[\w.-]+\.js)""", flags=(re.VERBOSE | re.MULTILINE))
 INDICES_REGEX = re.compile(
-    r"""(\(\w{1}\[(\d{1,2})\],\s*16\))+""", flags=(re.VERBOSE | re.MULTILINE))
+    r"""\(\w+\[(\d{1,3})\],\s*16\)""", flags=(re.VERBOSE | re.MULTILINE))
 
 
 def interpolate(from_list: List[Union[float, int]], to_list: List[Union[float, int]], f: Union[float, int]):
@@ -111,14 +113,47 @@ class TransactionGenerator:
     def get_indices(self, home_page_html=None):
         key_byte_indices = []
         response = self.validate_response(home_page_html) or self.home_page_html
-        on_demand_file = ON_DEMAND_FILE_REGEX.search(str(response))
+        response_text = str(response)
+        on_demand_file = ON_DEMAND_FILE_REGEX.search(response_text)
+        on_demand_bundle = ON_DEMAND_BUNDLE_REGEX.search(response_text)
+
+        candidate_urls = []
         if on_demand_file:
-            on_demand_file_url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{on_demand_file.group(1)}a.js"
-            on_demand_file_response = httpx.get(on_demand_file_url)
-            key_byte_indices_match = INDICES_REGEX.finditer(
-                str(on_demand_file_response.text))
-            for item in key_byte_indices_match:
-                key_byte_indices.append(item.group(2))
+            file_value = on_demand_file.group(1)
+            if file_value.startswith("http://") or file_value.startswith("https://"):
+                candidate_urls.append(file_value)
+            elif file_value.endswith(".js"):
+                candidate_urls.extend([
+                    f"https://abs.twimg.com/responsive-web/client-web/{file_value}",
+                    f"https://abs.twimg.com/responsive-web/client-web-legacy/{file_value}",
+                ])
+            else:
+                candidate_urls.extend([
+                    f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{file_value}a.js",
+                    f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{file_value}.js",
+                    f"https://abs.twimg.com/responsive-web/client-web-legacy/ondemand.s.{file_value}a.js",
+                    f"https://abs.twimg.com/responsive-web/client-web-legacy/ondemand.s.{file_value}.js",
+                ])
+        if on_demand_bundle:
+            bundle_name = on_demand_bundle.group(1)
+            candidate_urls.extend([
+                f"https://abs.twimg.com/responsive-web/client-web/{bundle_name}",
+                f"https://abs.twimg.com/responsive-web/client-web-legacy/{bundle_name}",
+            ])
+
+        for on_demand_file_url in candidate_urls:
+            try:
+                on_demand_file_response = httpx.get(on_demand_file_url)
+                if on_demand_file_response.status_code != 200:
+                    continue
+                key_byte_indices_match = INDICES_REGEX.finditer(
+                    str(on_demand_file_response.text))
+                for item in key_byte_indices_match:
+                    key_byte_indices.append(item.group(1))
+                if key_byte_indices:
+                    break
+            except Exception:
+                continue
         if not key_byte_indices:
             raise Exception("Couldn't get animation key indices")
         key_byte_indices = list(map(int, key_byte_indices))
